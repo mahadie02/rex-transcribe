@@ -261,14 +261,18 @@ def download_stream_audio_with_ytdlp(url: str) -> str:
     Uses a format fallback chain to handle platforms (e.g. Linux ARM64 headless VPS) where
     YouTube InnerTube clients return fewer available formats than on desktop Windows.
     """
-    # Progressively more lenient format selectors.
+    # Progressively more lenient fallback strategies.
     # On healthy setups the first entry works; on restricted environments the later ones kick in.
-    FORMAT_FALLBACK_CHAIN = [
-        "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[ext=mp3]/bestaudio",
-        "bestaudio*",                     # includes audio extracted from video-only formats
-        "best[acodec!=none]",             # any format with an audio track
-        "bestvideo*+bestaudio/best",      # merge best streams (yt-dlp picks what's available)
-        "worst[acodec!=none]/worst/best", # absolute last resort
+    # Each entry is a tuple: (format_string, use_extractor_args, use_js_runtimes)
+    FALLBACK_STRATEGIES = [
+        ("bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[ext=mp3]/bestaudio", True, True),
+        ("bestaudio*", True, True),
+        ("best[acodec!=none]", True, True),
+        # If the above fail, it's usually because the requested player_client (e.g. android/ios)
+        # requires PO tokens or JS runtimes that are missing. Drop the custom clients and try bare yt-dlp.
+        ("bestaudio/best", False, True),
+        # Absolute last resort: no custom clients, no custom JS runtimes, just anything yt-dlp can find
+        ("worst[acodec!=none]/worst/best", False, False),
     ]
 
     try:
@@ -282,7 +286,7 @@ def download_stream_audio_with_ytdlp(url: str) -> str:
     ytdlp_verbose = (os.getenv("YTDLP_VERBOSE") or "").lower() in ("1", "true", "yes")
     last_error: Exception | None = None
 
-    for fmt_idx, fmt in enumerate(FORMAT_FALLBACK_CHAIN):
+    for strat_idx, (fmt, use_extractor_args, use_js_runtimes) in enumerate(FALLBACK_STRATEGIES):
         base = tempfile.NamedTemporaryFile(delete=False).name
         out_tmpl = base + ".%(ext)s"
         ydl_opts = {
@@ -293,12 +297,17 @@ def download_stream_audio_with_ytdlp(url: str) -> str:
             "no_warnings": not ytdlp_verbose,
             "no_color": True,
             "noplaylist": True,
-            "extractor_args": _ytdlp_youtube_extractor_args(),
         }
+        if use_extractor_args:
+            ydl_opts["extractor_args"] = _ytdlp_youtube_extractor_args()
+        
         # Only set merge_output_format when the format string can produce a merge
         if "+" in fmt:
             ydl_opts["merge_output_format"] = "mp4"
-        ydl_opts.update(_ytdlp_js_runtime_options())
+            
+        if use_js_runtimes:
+            ydl_opts.update(_ytdlp_js_runtime_options())
+            
         ydl_opts.update(_ytdlp_cookie_options())
 
         try:
@@ -327,7 +336,7 @@ def download_stream_audio_with_ytdlp(url: str) -> str:
                 raise HTTPException(status_code=400, detail=f"Failed to download audio from URL: {msg}") from e
 
             # "Requested format is not available" or similar → try next selector
-            if fmt_idx < len(FORMAT_FALLBACK_CHAIN) - 1:
+            if strat_idx < len(FALLBACK_STRATEGIES) - 1:
                 print(f"[yt-dlp] format '{fmt}' failed ({msg}), trying next fallback...")
                 continue
             # All formats exhausted
