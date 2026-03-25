@@ -196,7 +196,7 @@ def _ytdlp_cookie_options() -> dict:
 
 def download_stream_audio_with_ytdlp(url: str) -> str:
     """
-    Download best audio from a URL supported by yt-dlp (YouTube, Facebook, Instagram,
+    Download best audio from a URL supported by yt-dlp (YouTube watch + /shorts/, Facebook, Instagram,
     TikTok, X/Twitter, Threads, and many other sites).
     Returns path to a temp audio file.
     """
@@ -204,11 +204,16 @@ def download_stream_audio_with_ytdlp(url: str) -> str:
         import yt_dlp
         base = tempfile.NamedTemporaryFile(delete=False).name
         out_tmpl = base + ".%(ext)s"
+        # YouTube often has no single "bestaudio" in the list (DASH-only); merge bv+ba then extract audio.
+        # Shorts (youtube.com/shorts/ID) use the same extractor as watch URLs.
         ydl_opts = {
-            "format": "bestaudio/best",
+            "format": "bestaudio/bv+ba/best/worst",
+            "merge_output_format": "mp4",
             "outtmpl": out_tmpl,
             "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}],
             "quiet": True,
+            "no_color": True,
+            "noplaylist": True,
         }
         ydl_opts.update(_ytdlp_cookie_options())
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -672,7 +677,7 @@ async def transcript(
     video: UploadFile = File(None, description="Video file (mp4, mkv, avi, mov, webm)"),
     video_base64: Optional[str] = Form(None, description="Video as base64-encoded string"),
     video_url: Optional[str] = Form(None, description="Direct URL to video file"),
-    youtube_url: Optional[str] = Form(None, description="YouTube video URL"),
+    youtube_url: Optional[str] = Form(None, description="YouTube watch or /shorts/ URL"),
     fb_url: Optional[str] = Form(None, description="Facebook video/reel URL (yt-dlp)"),
     insta_url: Optional[str] = Form(None, description="Instagram reel/post URL (yt-dlp)"),
     tiktok_url: Optional[str] = Form(None, description="TikTok video URL (yt-dlp)"),
