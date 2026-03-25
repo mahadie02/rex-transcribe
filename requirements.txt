@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-multipart
+python-dotenv
+whisperx
+scipy
+requests
+aiohttp
+yt-dlp
