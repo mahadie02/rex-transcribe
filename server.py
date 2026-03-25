@@ -240,6 +240,7 @@ def _ytdlp_youtube_extractor_args() -> dict:
     return {
         "youtube": {
             "player_client": [
+                "web",
                 "android",
                 "ios",
                 "android_vr",
@@ -256,17 +257,36 @@ def download_stream_audio_with_ytdlp(url: str) -> str:
     Download best audio from a URL supported by yt-dlp (YouTube watch + /shorts/, Facebook, Instagram,
     TikTok, X/Twitter, Threads, and many other sites).
     Returns path to a temp audio file.
+
+    Uses a format fallback chain to handle platforms (e.g. Linux ARM64 headless VPS) where
+    YouTube InnerTube clients return fewer available formats than on desktop Windows.
     """
+    # Progressively more lenient format selectors.
+    # On healthy setups the first entry works; on restricted environments the later ones kick in.
+    FORMAT_FALLBACK_CHAIN = [
+        "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[ext=mp3]/bestaudio",
+        "bestaudio*",                     # includes audio extracted from video-only formats
+        "best[acodec!=none]",             # any format with an audio track
+        "bestvideo*+bestaudio/best",      # merge best streams (yt-dlp picks what's available)
+        "worst[acodec!=none]/worst/best", # absolute last resort
+    ]
+
     try:
         import yt_dlp
+    except ImportError:
+        raise HTTPException(
+            status_code=500,
+            detail="yt-dlp is required for stream URLs. Install with: pip install yt-dlp",
+        )
+
+    ytdlp_verbose = (os.getenv("YTDLP_VERBOSE") or "").lower() in ("1", "true", "yes")
+    last_error: Exception | None = None
+
+    for fmt_idx, fmt in enumerate(FORMAT_FALLBACK_CHAIN):
         base = tempfile.NamedTemporaryFile(delete=False).name
         out_tmpl = base + ".%(ext)s"
-        # YouTube often has no single "bestaudio" in the list (DASH-only); merge bv+ba then extract audio.
-        # Shorts (youtube.com/shorts/ID) use the same extractor as watch URLs.
-        ytdlp_verbose = (os.getenv("YTDLP_VERBOSE") or "").lower() in ("1", "true", "yes")
         ydl_opts = {
-            "format": "bestaudio/bv+ba/ba+bv/best/worst",
-            "merge_output_format": "mp4",
+            "format": fmt,
             "outtmpl": out_tmpl,
             "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "m4a"}],
             "quiet": not ytdlp_verbose,
@@ -275,29 +295,47 @@ def download_stream_audio_with_ytdlp(url: str) -> str:
             "noplaylist": True,
             "extractor_args": _ytdlp_youtube_extractor_args(),
         }
+        # Only set merge_output_format when the format string can produce a merge
+        if "+" in fmt:
+            ydl_opts["merge_output_format"] = "mp4"
         ydl_opts.update(_ytdlp_js_runtime_options())
         ydl_opts.update(_ytdlp_cookie_options())
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-        for ext in (".m4a", ".mp3", ".webm", ".opus"):
-            p = base + ext
-            if os.path.exists(p):
-                return p
-        raise RuntimeError("yt-dlp did not produce an audio file")
-    except ImportError:
-        raise HTTPException(
-            status_code=500,
-            detail="yt-dlp is required for stream URLs. Install with: pip install yt-dlp",
-        )
-    except Exception as e:
-        msg = str(e)
-        if "Sign in to confirm" in msg or "not a bot" in msg:
-            msg += (
-                ". Set YTDLP_COOKIES_FROM_BROWSER (e.g. chromium on Linux/arm64, edge or chrome on Windows) or "
-                "YTDLP_COOKIES_FILE to a cookies.txt exported while logged into YouTube. "
-                "See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
-            )
-        raise HTTPException(status_code=400, detail=f"Failed to download audio from URL: {msg}") from e
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            for ext in (".m4a", ".mp3", ".webm", ".opus", ".wav", ".ogg"):
+                p = base + ext
+                if os.path.exists(p):
+                    return p
+            # yt-dlp ran but didn't produce a recognisable audio file — try next format
+            last_error = RuntimeError("yt-dlp did not produce an audio file")
+            print(f"[yt-dlp] format '{fmt}' produced no audio file, trying next fallback...")
+            continue
+        except Exception as e:
+            last_error = e
+            msg = str(e)
+            # These errors are fatal regardless of format — stop trying
+            if "Sign in to confirm" in msg or "not a bot" in msg:
+                msg += (
+                    ". Set YTDLP_COOKIES_FROM_BROWSER (e.g. chromium on Linux/arm64, edge or chrome on Windows) or "
+                    "YTDLP_COOKIES_FILE to a cookies.txt exported while logged into YouTube. "
+                    "See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
+                )
+                raise HTTPException(status_code=400, detail=f"Failed to download audio from URL: {msg}") from e
+            if "Video unavailable" in msg or "Private video" in msg or "removed" in msg.lower():
+                raise HTTPException(status_code=400, detail=f"Failed to download audio from URL: {msg}") from e
+
+            # "Requested format is not available" or similar → try next selector
+            if fmt_idx < len(FORMAT_FALLBACK_CHAIN) - 1:
+                print(f"[yt-dlp] format '{fmt}' failed ({msg}), trying next fallback...")
+                continue
+            # All formats exhausted
+            raise HTTPException(status_code=400, detail=f"Failed to download audio from URL: {msg}") from e
+
+    # Should not reach here, but just in case
+    msg = str(last_error) if last_error else "Unknown error"
+    raise HTTPException(status_code=400, detail=f"Failed to download audio from URL: {msg}")
 
 
 async def resolve_audio_input(
