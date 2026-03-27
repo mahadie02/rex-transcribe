@@ -235,26 +235,37 @@ def _ytdlp_js_runtime_options() -> dict:
     """
     Build yt-dlp Python API options for JS runtimes.
     Uses the 'js_runtimes' key supported by newer yt-dlp versions.
+    Also enables remote_components so yt-dlp can download the EJS
+    challenge solver script required for YouTube JS challenges.
     """
+    opts: dict = {}
+    # Enable remote EJS challenge solver (required for YouTube on datacenter IPs)
+    opts["remote_components"] = ["ejs:github"]
     rt_name, rt_path = _resolve_js_runtime()
     if not rt_name:
-        return {}
+        return opts
     if rt_path:
-        return {"js_runtimes": {rt_name: {"path": rt_path}}}
-    return {"js_runtimes": {rt_name: {}}}
+        opts["js_runtimes"] = {rt_name: {"path": rt_path}}
+    else:
+        opts["js_runtimes"] = {rt_name: {}}
+    return opts
 
 
 def _ytdlp_js_runtime_cli_args() -> list[str]:
     """
     Build yt-dlp CLI arguments for JS runtimes.
-    Returns e.g. ['--js-runtimes', 'node:/usr/bin/node'] or [].
+    Returns e.g. ['--remote-components', 'ejs:github', '--js-runtimes', 'node:/usr/bin/node'] or [].
+    Also includes --remote-components so the EJS challenge solver can be fetched.
     """
+    args: list[str] = ["--remote-components", "ejs:github"]
     rt_name, rt_path = _resolve_js_runtime()
     if not rt_name:
-        return []
+        return args
     if rt_path:
-        return ["--js-runtimes", f"{rt_name}:{rt_path}"]
-    return ["--js-runtimes", rt_name]
+        args.extend(["--js-runtimes", f"{rt_name}:{rt_path}"])
+    else:
+        args.extend(["--js-runtimes", rt_name])
+    return args
 
 
 def _ytdlp_youtube_extractor_args() -> dict:
