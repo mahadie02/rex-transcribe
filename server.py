@@ -195,34 +195,66 @@ def _ytdlp_cookie_options() -> dict:
     return opts
 
 
-def _ytdlp_js_runtime_options() -> dict:
+def _resolve_js_runtime() -> tuple[str | None, str | None]:
     """
-    yt-dlp defaults to enabling 'deno' even when not installed, which yields no working JS runtime
-    on minimal Linux servers and forces a weak YouTube client set (often → 'Requested format is not available').
+    Resolve which JS runtime to use and its path.
+    Returns (runtime_name, runtime_path) or (None, None) if disabled.
 
-    - YTDLP_JS_RUNTIMES=auto (default): enable every runtime found on PATH among deno, node, bun, quickjs.
-    - YTDLP_JS_RUNTIMES=none: disable all (rely on multi-client YouTube extraction only).
-    - YTDLP_JS_RUNTIMES=node or deno:bun: optional explicit path after colon, e.g. node:/usr/bin/node
+    yt-dlp only enables 'deno' by default — it does NOT auto-detect node/bun.
+    You MUST explicitly tell it to use node via --js-runtimes or the Python API.
+
+    Configure via env:
+    - YTDLP_JS_RUNTIMES=auto (default): detect node/deno/bun on PATH.
+    - YTDLP_JS_RUNTIMES=none: disable all.
+    - YTDLP_JS_RUNTIMES=node:/usr/bin/node: explicit runtime + path.
     See https://github.com/yt-dlp/yt-dlp/wiki/EJS
     """
     spec_raw = (os.getenv("YTDLP_JS_RUNTIMES") or "auto").strip()
     lower = spec_raw.lower()
     if lower in ("none", "off", "false", "0"):
-        return {"js_runtimes": {}}
+        return (None, None)
     if lower != "auto":
         if ":" in spec_raw:
             name, _, path = spec_raw.partition(":")
             name, path = name.strip().lower(), path.strip()
             if name in ("deno", "node", "bun", "quickjs") and path:
-                return {"js_runtimes": {name: {"path": path}}}
+                return (name, path)
         elif lower in ("deno", "node", "bun", "quickjs"):
-            return {"js_runtimes": {lower: {}}}
-        return {"js_runtimes": {}}
-    runtimes = {}
-    for name in ("deno", "node", "bun", "quickjs"):
-        if shutil.which(name):
-            runtimes[name] = {}
-    return {"js_runtimes": runtimes}
+            found = shutil.which(lower)
+            return (lower, found) if found else (lower, None)
+        return (None, None)
+    # Auto-detect: try each runtime on PATH
+    for name in ("node", "deno", "bun", "quickjs"):
+        path = shutil.which(name)
+        if path:
+            return (name, path)
+    return (None, None)
+
+
+def _ytdlp_js_runtime_options() -> dict:
+    """
+    Build yt-dlp Python API options for JS runtimes.
+    Uses the 'js_runtimes' key supported by newer yt-dlp versions.
+    """
+    rt_name, rt_path = _resolve_js_runtime()
+    if not rt_name:
+        return {}
+    if rt_path:
+        return {"js_runtimes": {rt_name: {"path": rt_path}}}
+    return {"js_runtimes": {rt_name: {}}}
+
+
+def _ytdlp_js_runtime_cli_args() -> list[str]:
+    """
+    Build yt-dlp CLI arguments for JS runtimes.
+    Returns e.g. ['--js-runtimes', 'node:/usr/bin/node'] or [].
+    """
+    rt_name, rt_path = _resolve_js_runtime()
+    if not rt_name:
+        return []
+    if rt_path:
+        return ["--js-runtimes", f"{rt_name}:{rt_path}"]
+    return ["--js-runtimes", rt_name]
 
 
 def _ytdlp_youtube_extractor_args() -> dict:
@@ -252,28 +284,120 @@ def _ytdlp_youtube_extractor_args() -> dict:
     }
 
 
+def _log_ytdlp_diagnostics() -> None:
+    """Print yt-dlp diagnostics at first use (once)."""
+    if getattr(_log_ytdlp_diagnostics, "_done", False):
+        return
+    _log_ytdlp_diagnostics._done = True  # type: ignore[attr-defined]
+    try:
+        import yt_dlp
+        ver = getattr(yt_dlp, "version", getattr(yt_dlp, "__version__", "unknown"))
+        if hasattr(ver, "__version__"):
+            ver = ver.__version__
+        print(f"[yt-dlp] version: {ver}")
+    except Exception:
+        print("[yt-dlp] WARNING: could not determine yt-dlp version")
+    # Check JS runtimes
+    for rt in ("node", "deno", "bun"):
+        rt_path = shutil.which(rt)
+        if rt_path:
+            print(f"[yt-dlp] JS runtime '{rt}' found at: {rt_path}")
+    js_cfg = _ytdlp_js_runtime_options()
+    print(f"[yt-dlp] JS runtime config: {js_cfg}")
+    ext_cfg = _ytdlp_youtube_extractor_args()
+    print(f"[yt-dlp] YouTube extractor args: {ext_cfg}")
+
+
+def _download_with_ytdlp_cli(url: str) -> str:
+    """
+    Last-resort fallback: call yt-dlp as a subprocess (CLI).
+    The CLI handles JS runtimes natively and more reliably than the Python API,
+    because the Python API's `js_runtimes` option may not be supported on all versions.
+    """
+    base = tempfile.NamedTemporaryFile(delete=False, suffix="").name
+    out_tmpl = base + ".%(ext)s"
+
+    # Build the yt-dlp CLI command
+    # Find yt-dlp binary: prefer the one in venv, then system
+    ytdlp_bin = shutil.which("yt-dlp")
+    if not ytdlp_bin:
+        # Try the venv's scripts directory
+        venv_dir = Path(__file__).parent / "venv"
+        for candidate in [
+            venv_dir / "bin" / "yt-dlp",
+            venv_dir / "Scripts" / "yt-dlp.exe",
+            venv_dir / "Scripts" / "yt-dlp",
+        ]:
+            if candidate.exists():
+                ytdlp_bin = str(candidate)
+                break
+    if not ytdlp_bin:
+        raise RuntimeError("yt-dlp CLI binary not found in PATH or venv")
+
+    cmd = [
+        ytdlp_bin,
+        "-f", "bestaudio/best",
+        "-x",                          # extract audio
+        "--audio-format", "m4a",
+        "--no-playlist",
+        "-o", out_tmpl,
+        "--no-color",
+    ]
+    # Critical: yt-dlp only enables deno by default, must explicitly enable node/bun
+    cmd.extend(_ytdlp_js_runtime_cli_args())
+    # Add cookies if configured
+    cookie_opts = _ytdlp_cookie_options()
+    if "cookiefile" in cookie_opts:
+        cmd.extend(["--cookies", cookie_opts["cookiefile"]])
+    elif "cookiesfrombrowser" in cookie_opts:
+        browser_tuple = cookie_opts["cookiesfrombrowser"]
+        cmd.extend(["--cookies-from-browser", ":".join(browser_tuple)])
+
+    cmd.append(url)
+
+    ytdlp_verbose = (os.getenv("YTDLP_VERBOSE") or "").lower() in ("1", "true", "yes")
+    if ytdlp_verbose:
+        cmd.append("-v")
+
+    print(f"[yt-dlp] CLI fallback: {' '.join(cmd)}")
+
+    env = os.environ.copy()
+    # Ensure the JS runtime binary directory is on PATH for yt-dlp's subprocess
+    _, rt_path = _resolve_js_runtime()
+    if rt_path and os.path.isfile(rt_path):
+        rt_dir = str(Path(rt_path).parent)
+        if rt_dir not in env.get("PATH", ""):
+            env["PATH"] = rt_dir + os.pathsep + env.get("PATH", "")
+
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=300)
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip() if result.stderr else ""
+        stdout = result.stdout.strip() if result.stdout else ""
+        error_detail = stderr or stdout or "Unknown CLI error"
+        raise RuntimeError(f"yt-dlp CLI failed: {error_detail}")
+
+    # Find the output file
+    for ext in (".m4a", ".mp3", ".webm", ".opus", ".wav", ".ogg", ".mp4"):
+        p = base + ext
+        if os.path.exists(p):
+            return p
+
+    raise RuntimeError("yt-dlp CLI did not produce an audio file")
+
+
 def download_stream_audio_with_ytdlp(url: str) -> str:
     """
     Download best audio from a URL supported by yt-dlp (YouTube watch + /shorts/, Facebook, Instagram,
     TikTok, X/Twitter, Threads, and many other sites).
     Returns path to a temp audio file.
 
-    Uses a format fallback chain to handle platforms (e.g. Linux ARM64 headless VPS) where
-    YouTube InnerTube clients return fewer available formats than on desktop Windows.
+    Strategy:
+    1. Try the Python API with progressively more lenient format selectors.
+    2. If ALL Python API attempts fail, fall back to calling yt-dlp as a CLI subprocess,
+       which handles JS runtimes natively and more reliably.
     """
-    # Progressively more lenient fallback strategies.
-    # On healthy setups the first entry works; on restricted environments the later ones kick in.
-    # Each entry is a tuple: (format_string, use_extractor_args, use_js_runtimes)
-    FALLBACK_STRATEGIES = [
-        ("bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[ext=mp3]/bestaudio", True, True),
-        ("bestaudio*", True, True),
-        ("best[acodec!=none]", True, True),
-        # If the above fail, it's usually because the requested player_client (e.g. android/ios)
-        # requires PO tokens or JS runtimes that are missing. Drop the custom clients and try bare yt-dlp.
-        ("bestaudio/best", False, True),
-        # Absolute last resort: no custom clients, no custom JS runtimes, just anything yt-dlp can find
-        ("worst[acodec!=none]/worst/best", False, False),
-    ]
+    _log_ytdlp_diagnostics()
 
     try:
         import yt_dlp
@@ -282,6 +406,16 @@ def download_stream_audio_with_ytdlp(url: str) -> str:
             status_code=500,
             detail="yt-dlp is required for stream URLs. Install with: pip install yt-dlp",
         )
+
+    # Progressively more lenient fallback strategies.
+    # Each entry is a tuple: (format_string, use_extractor_args, use_js_runtimes)
+    FALLBACK_STRATEGIES = [
+        ("bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio[ext=mp3]/bestaudio", True, True),
+        ("bestaudio*", True, True),
+        ("best[acodec!=none]", True, True),
+        ("bestaudio/best", False, True),
+        ("worst[acodec!=none]/worst/best", False, False),
+    ]
 
     ytdlp_verbose = (os.getenv("YTDLP_VERBOSE") or "").lower() in ("1", "true", "yes")
     last_error: Exception | None = None
@@ -300,14 +434,10 @@ def download_stream_audio_with_ytdlp(url: str) -> str:
         }
         if use_extractor_args:
             ydl_opts["extractor_args"] = _ytdlp_youtube_extractor_args()
-        
-        # Only set merge_output_format when the format string can produce a merge
         if "+" in fmt:
             ydl_opts["merge_output_format"] = "mp4"
-            
         if use_js_runtimes:
             ydl_opts.update(_ytdlp_js_runtime_options())
-            
         ydl_opts.update(_ytdlp_cookie_options())
 
         try:
@@ -317,14 +447,13 @@ def download_stream_audio_with_ytdlp(url: str) -> str:
                 p = base + ext
                 if os.path.exists(p):
                     return p
-            # yt-dlp ran but didn't produce a recognisable audio file — try next format
             last_error = RuntimeError("yt-dlp did not produce an audio file")
             print(f"[yt-dlp] format '{fmt}' produced no audio file, trying next fallback...")
             continue
         except Exception as e:
             last_error = e
             msg = str(e)
-            # These errors are fatal regardless of format — stop trying
+            # Fatal errors — stop immediately
             if "Sign in to confirm" in msg or "not a bot" in msg:
                 msg += (
                     ". Set YTDLP_COOKIES_FROM_BROWSER (e.g. chromium on Linux/arm64, edge or chrome on Windows) or "
@@ -335,16 +464,29 @@ def download_stream_audio_with_ytdlp(url: str) -> str:
             if "Video unavailable" in msg or "Private video" in msg or "removed" in msg.lower():
                 raise HTTPException(status_code=400, detail=f"Failed to download audio from URL: {msg}") from e
 
-            # "Requested format is not available" or similar → try next selector
             if strat_idx < len(FALLBACK_STRATEGIES) - 1:
                 print(f"[yt-dlp] format '{fmt}' failed ({msg}), trying next fallback...")
                 continue
-            # All formats exhausted
-            raise HTTPException(status_code=400, detail=f"Failed to download audio from URL: {msg}") from e
+            # All Python API strategies exhausted — fall through to CLI fallback below
+            print(f"[yt-dlp] All Python API strategies failed. Trying CLI subprocess fallback...")
 
-    # Should not reach here, but just in case
-    msg = str(last_error) if last_error else "Unknown error"
-    raise HTTPException(status_code=400, detail=f"Failed to download audio from URL: {msg}")
+    # === FINAL FALLBACK: CLI subprocess ===
+    # The Python API's js_runtimes option may not be supported on all yt-dlp versions.
+    # The CLI handles JS runtimes natively and more reliably.
+    try:
+        return _download_with_ytdlp_cli(url)
+    except Exception as cli_err:
+        msg = str(cli_err)
+        if "Sign in to confirm" in msg or "not a bot" in msg:
+            msg += (
+                ". Set YTDLP_COOKIES_FROM_BROWSER or YTDLP_COOKIES_FILE. "
+                "See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
+            )
+        api_msg = str(last_error) if last_error else "unknown"
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to download audio from URL. Python API error: {api_msg} | CLI error: {msg}",
+        ) from cli_err
 
 
 async def resolve_audio_input(
