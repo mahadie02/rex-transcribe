@@ -1064,11 +1064,11 @@ async def transcript(
     split_on_punctuation: bool = Form(True, description="Split at punctuation marks (comma, period, etc.) before applying max_line_width. Set False to split only by width."),
     smart_split: bool = Form(False, description="Produce balanced line breaks instead of greedy packing. E.g. 'Explanation by the tongue / makes most things clear' instead of 'Explanation by the tongue makes most / things clear'"),
     # Model
-    model: str = Form("base", description="Whisper model: tiny, base, small, medium, large-v2, large-v3"),
+    model: Optional[str] = Form(None, description="Whisper model: tiny, base, small, medium, large-v2, large-v3. Defaults to WHISPER_MODEL from .env"),
     batch_size: int = Form(16, description="Batch size for inference"),
     language: Optional[str] = Form(None, description="Language code (e.g. en, de, fr) or None for auto"),
-    device: Optional[str] = Form(None, description="Device: cuda or cpu"),
-    compute_type: Optional[str] = Form(None, description="Compute type: float16, int8"),
+    device: Optional[str] = Form(None, description="Device: cuda or cpu. Defaults to DEVICE from .env"),
+    compute_type: Optional[str] = Form(None, description="Compute type: float16, int8. Defaults to COMPUTE_TYPE from .env"),
     no_align: bool = Form(False, description="Skip word-level alignment"),
     # Diarization
     diarize: bool = Form(False, description="Enable speaker diarization"),

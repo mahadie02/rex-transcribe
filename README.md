@@ -194,15 +194,19 @@ When `split_on_punctuation=false`, text is treated as one continuous block and s
 
 ### Model Parameters
 
+All three of `model`, `device`, and `compute_type` default to your `.env` settings when not passed in the request. Pass them per-request to override `.env` for that call only (e.g. use `large-v3` for a specific Bengali transcription while keeping `medium` as default).
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model` | string | base | Whisper model: tiny, base, small, medium, large-v2, large-v3 |
+| `model` | string | `.env` `WHISPER_MODEL` | Whisper model: tiny, base, small, medium, large-v2, large-v3 |
 | `batch_size` | int | 16 | Batch size for inference (reduce if low on GPU memory) |
-| `language` | string | null | Language code (e.g. en, de, fr). null = auto-detect |
-| `device` | string | null | cuda or cpu (null = use env default) |
-| `compute_type` | string | null | float16 or int8 |
+| `language` | string | null | Language code (e.g. en, bn, de, fr). null = auto-detect |
+| `device` | string | `.env` `DEVICE` | cuda or cpu |
+| `compute_type` | string | `.env` `COMPUTE_TYPE` | float16 or int8 |
 | `no_align` | bool | false | Skip word-level alignment (faster, less accurate timestamps) |
 | `task` | string | transcribe | transcribe or translate |
+
+> **Note:** Word-level alignment is not available for all languages. If the language (e.g. Bengali `bn`) has no alignment model, the server automatically skips alignment and returns segment-level timestamps instead of crashing.
 
 ---
 
