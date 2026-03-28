@@ -194,11 +194,11 @@ When `split_on_punctuation=false`, text is treated as one continuous block and s
 
 ### Model Parameters
 
-All three of `model`, `device`, and `compute_type` default to your `.env` settings when not passed in the request. Pass them per-request to override `.env` for that call only (e.g. use `large-v3` for a specific Bengali transcription while keeping `medium` as default).
+All three of `model`, `device`, and `compute_type` default to your `.env` settings when not passed in the request. Pass them per-request to override `.env` for that call only (e.g. use a Bengali fine-tuned model for a specific request while keeping `medium` as default).
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `model` | string | `.env` `WHISPER_MODEL` | Whisper model: tiny, base, small, medium, large-v2, large-v3 |
+| `model` | string | `.env` `WHISPER_MODEL` | Standard Whisper model name or HuggingFace model ID (see below) |
 | `batch_size` | int | 16 | Batch size for inference (reduce if low on GPU memory) |
 | `language` | string | null | Language code (e.g. en, bn, de, fr). null = auto-detect |
 | `device` | string | `.env` `DEVICE` | cuda or cpu |
@@ -207,6 +207,33 @@ All three of `model`, `device`, and `compute_type` default to your `.env` settin
 | `task` | string | transcribe | transcribe or translate |
 
 > **Note:** Word-level alignment is not available for all languages. If the language (e.g. Bengali `bn`) has no alignment model, the server automatically skips alignment and returns segment-level timestamps instead of crashing.
+
+#### Supported Models
+
+**Standard Whisper models:** `tiny`, `base`, `small`, `medium`, `large-v2`, `large-v3`
+
+**HuggingFace fine-tuned models:** Any WhisperX-compatible HuggingFace model ID can be passed as the `model` parameter or set in `.env`. These are downloaded automatically on first use.
+
+| Model ID | Language | Base | Notes |
+|----------|----------|------|-------|
+| `bangla-speech-processing/BanglaASR` | Bengali | whisper-small | 4.58% WER, best Bengali starting point |
+| `bengaliAI/tugstugi_bengaliai-regional-asr_whisper-medium` | Bengali (dialects) | whisper-medium | Covers 10 regional dialects |
+| `anuragshas/whisper-large-v2-bn` | Bengali | whisper-large-v2 | Larger, higher accuracy |
+
+**Example — Bengali transcription with fine-tuned model:**
+```bash
+curl -X POST http://localhost:5505/transcript \
+  -H "API_KEY: your_api_key" \
+  -F "youtube_url=https://www.youtube.com/watch?v=VIDEO_ID" \
+  -F "model=bangla-speech-processing/BanglaASR" \
+  -F "language=bn" \
+  -F "output_format=json"
+```
+
+**Or set as default in `.env`:**
+```ini
+WHISPER_MODEL=bangla-speech-processing/BanglaASR
+```
 
 ---
 
