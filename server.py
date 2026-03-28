@@ -837,11 +837,17 @@ def _split_text_into_phrases(
                     phrases.append(" ".join(line_words))
             continue
 
-        if current:
-            combined = " ".join(current) + " " + part
-            if len(combined) > max_line_width:
-                flush()
-        current.append(part)
+        if split_on_punctuation:
+            # Punctuation-split parts stay separate — don't merge them back
+            flush()
+            current.append(part)
+        else:
+            # No punctuation splitting — merge short parts that fit within max_line_width
+            if current:
+                combined = " ".join(current) + " " + part
+                if len(combined) > max_line_width:
+                    flush()
+            current.append(part)
 
     flush()
 
