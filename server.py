@@ -670,16 +670,20 @@ def transcribe_audio(audio_path: str, params: dict) -> dict:
     # Align (unless no_align)
     if not no_align and len(result.get("segments", [])) > 0:
         lang = result.get("language", "en")
-        model_a, metadata = whisperx.load_align_model(
-            language_code=lang,
-            device=device,
-            model_dir=str(MODELS_DIR),
-        )
-        result = whisperx.align(result["segments"], model_a, metadata, audio, device)
-        del model_a
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        try:
+            model_a, metadata = whisperx.load_align_model(
+                language_code=lang,
+                device=device,
+                model_dir=str(MODELS_DIR),
+            )
+            result = whisperx.align(result["segments"], model_a, metadata, audio, device)
+            del model_a
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ValueError:
+            # No alignment model for this language — skip silently
+            print(f"[whisperx] No alignment model for language '{lang}', skipping alignment (segment-level timestamps only)")
 
     # Diarize (optional)
     if diarize and hf_token:
